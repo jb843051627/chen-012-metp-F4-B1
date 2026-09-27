@@ -18,9 +18,11 @@ import com.fc.v2.service.ITMetpFixCardService;
 @Service
 public class TMetpFixCardServiceImpl implements ITMetpFixCardService {
 
-    private static final int MAX_STAGE = 3;
-    private static final int STATUS_ACTIVE = 1;
-    private static final int STATUS_TERMINAL = 2;
+    /** 关口 0..5，推进/回退同用这一把尺 */
+    private static final int MAX_STAGE = 5;
+    /** 卡的落定：0在办 1已解除 2已归档（办结） */
+    private static final int STATUS_ACTIVE = 0;
+    private static final int STATUS_ARCHIVED = 2;
 
     @javax.annotation.Resource
     private TMetpFixCardMapper metpFixCardMapper;
@@ -35,15 +37,22 @@ public class TMetpFixCardServiceImpl implements ITMetpFixCardService {
         return this.metpFixCardMapper.selectList(queryWrapper);
     }
 
+    /** 已办结（已归档）的卡不再受理任何流转/改动 */
+    private static boolean isTerminal(TMetpFixCard r) {
+        return r.getStatus() != null && r.getStatus().intValue() == STATUS_ARCHIVED;
+    }
+
     @Override
     public TMetpFixCard advance(Long id, String remark) {
         TMetpFixCard r = this.metpFixCardMapper.selectById(id);
-        if (r == null) {
+        if (r == null || isTerminal(r)) {
             return null;
         }
-        int st = r.getStage() == null ? 0 : r.getStage();
-        r.setStage(Math.min(st + 2, MAX_STAGE));
-        r.setStatus(STATUS_ACTIVE);
+        int st = r.getStage() == null ? 0 : r.getStage().intValue();
+        st = Math.min(st + 1, MAX_STAGE);
+        r.setStage(Integer.valueOf(st));
+        // 闯过末关即归卷办结；否则仍在办
+        r.setStatus(Integer.valueOf(st >= MAX_STAGE ? STATUS_ARCHIVED : STATUS_ACTIVE));
         r.setLastAction(remark);
         this.metpFixCardMapper.updateById(r);
         return r;
@@ -55,8 +64,10 @@ public class TMetpFixCardServiceImpl implements ITMetpFixCardService {
         if (r == null) {
             return null;
         }
-        r.setStage(0);
-        r.setStatus(STATUS_ACTIVE);
+        int st = r.getStage() == null ? 0 : r.getStage().intValue();
+        // 退卷：与推进同一把尺，一次只退一档，退回到在办
+        r.setStage(Integer.valueOf(Math.max(st - 1, 0)));
+        r.setStatus(Integer.valueOf(STATUS_ACTIVE));
         r.setLastAction(remark);
         this.metpFixCardMapper.updateById(r);
         return r;
@@ -65,7 +76,7 @@ public class TMetpFixCardServiceImpl implements ITMetpFixCardService {
     @Override
     public boolean updateContent(Long id, String remark) {
         TMetpFixCard r = this.metpFixCardMapper.selectById(id);
-        if (r == null) {
+        if (r == null || isTerminal(r)) {
             return false;
         }
         r.setContent(remark);
@@ -75,7 +86,7 @@ public class TMetpFixCardServiceImpl implements ITMetpFixCardService {
     @Override
     public boolean remove(Long id) {
         TMetpFixCard r = this.metpFixCardMapper.selectById(id);
-        if (r == null) {
+        if (r == null || isTerminal(r)) {
             return false;
         }
         return this.metpFixCardMapper.deleteById(id) > 0;

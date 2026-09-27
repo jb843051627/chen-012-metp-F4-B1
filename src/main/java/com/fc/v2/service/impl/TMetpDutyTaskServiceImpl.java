@@ -19,6 +19,7 @@ import com.fc.v2.service.ITMetpDutyTaskService;
 @Service
 public class TMetpDutyTaskServiceImpl implements ITMetpDutyTaskService {
 
+    /** 执行窗口：单条提前派发天数须落在 [WIN_FROM, WIN_TO] 内（含两端） */
     private static final int WIN_FROM = 2;
     private static final int WIN_TO = 5;
     private static final int STATUS_WAIT = 0;
@@ -41,14 +42,39 @@ public class TMetpDutyTaskServiceImpl implements ITMetpDutyTaskService {
         return new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(d);
     }
 
+    /** 执行窗口内：提前派发天数落在 [WIN_FROM, WIN_TO]（含两端） */
+    private static boolean inWindow(TMetpDutyTask r) {
+        if (r.getAmount() == null) {
+            return false;
+        }
+        return r.getAmount().compareTo(new java.math.BigDecimal(WIN_FROM)) >= 0
+                && r.getAmount().compareTo(new java.math.BigDecimal(WIN_TO)) <= 0;
+    }
+
     @Override
     public List<TMetpDutyTask> listDue(Date at) {
-        List<TMetpDutyTask> all = this.metpDutyTaskMapper.selectList(new QueryWrapper<TMetpDutyTask>());
         List<TMetpDutyTask> due = new java.util.ArrayList<TMetpDutyTask>();
+        if (at == null) {
+            return due;
+        }
+        List<TMetpDutyTask> all = this.metpDutyTaskMapper.selectList(new QueryWrapper<TMetpDutyTask>());
         for (TMetpDutyTask r : all) {
-            if (r.getDueAt() != null && ts(r.getDueAt()).compareTo(ts(at)) < 0) {
-                due.add(r);
+            // 尚未处理：只认待派
+            if (r.getStatus() == null || r.getStatus().intValue() != STATUS_WAIT) {
+                continue;
             }
+            if (r.getDelFlag() != null && r.getDelFlag().intValue() != 0) {
+                continue;
+            }
+            // 到期：due_at 不晚于 at，恰好到期也算到期
+            if (r.getDueAt() == null || ts(r.getDueAt()).compareTo(ts(at)) > 0) {
+                continue;
+            }
+            // 执行窗口内
+            if (!inWindow(r)) {
+                continue;
+            }
+            due.add(r);
         }
         return due;
     }
@@ -56,13 +82,22 @@ public class TMetpDutyTaskServiceImpl implements ITMetpDutyTaskService {
     @Override
     public int runOnce(Date at) {
         List<TMetpDutyTask> due = listDue(at);
-        if (due.get(0) == null) {
+        if (due.isEmpty()) {
             return 0;
         }
         int ok = 0;
         for (TMetpDutyTask r : due) {
-            if (r.getAmount().signum() >= 0) {
-                ok++;
+            try {
+                if (r.getAmount() == null || r.getAmount().signum() < 0) {
+                    // 单条失败：标记派不出去，跳过继续
+                    r.setStatus(Integer.valueOf(STATUS_FAIL));
+                } else {
+                    r.setStatus(Integer.valueOf(STATUS_DONE));
+                    ok++;
+                }
+                this.metpDutyTaskMapper.updateById(r);
+            } catch (RuntimeException e) {
+                // 单条失败跳过继续，不拖垮整批
             }
         }
         return ok;

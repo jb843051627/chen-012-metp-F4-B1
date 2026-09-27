@@ -53,12 +53,25 @@ public class TMetpQcLineServiceImpl implements ITMetpQcLineService {
         return this.metpQcLineMapper.selectById(id);
     }
 
+    /** 可用口径：未删 + 现行 + 启用之日<=at + (交棒之日为空 或 at<交棒之日)。交棒当日即交棒，新旧不并立 */
+    private static QueryWrapper<TMetpQcLine> availableWrapper(Date at) {
+        String now = ts(at);
+        return new QueryWrapper<TMetpQcLine>()
+                .eq("del_flag", 0)
+                .eq("status", 0)
+                .and(w -> w.isNull("eff_start").or().le("eff_start", now))
+                .and(w -> w.isNull("eff_end").or().gt("eff_end", now));
+    }
+
     @Override
     public List<TMetpQcLine> listAvailable(Date at) {
         if (at == null) {
             return new java.util.ArrayList<TMetpQcLine>();
         }
-        return this.metpQcLineMapper.selectList(new QueryWrapper<TMetpQcLine>().eq("del_flag", 0));
+        List<TMetpQcLine> list = this.metpQcLineMapper.selectList(availableWrapper(at));
+        // 并档顺位降序，并列按 ruleCode 降序：谁先谁后得有章程
+        list.sort(PRIORITY_THEN_CODE_DESC);
+        return list;
     }
 
     @Override
@@ -66,7 +79,14 @@ public class TMetpQcLineServiceImpl implements ITMetpQcLineService {
         if (ruleCode == null || ruleCode.trim().isEmpty() || input == null || at == null) {
             return 0;
         }
+        if (input.compareTo(BigDecimal.ZERO) < 0
+                || input.compareTo(new BigDecimal("100")) > 0) {
+            return 0;
+        }
         TMetpQcLine rule = findRule(ruleCode, at);
+        if (rule == null) {
+            return 0;
+        }
         return levelOf(rule, input);
     }
 
@@ -91,7 +111,8 @@ public class TMetpQcLineServiceImpl implements ITMetpQcLineService {
         if (id == null || at == null) {
             return false;
         }
-        TMetpQcLine r = this.metpQcLineMapper.selectById(id);
+        // 与定位/列表同一把尺：存在且在 at 时点可用才算可用
+        TMetpQcLine r = this.metpQcLineMapper.selectOne(availableWrapper(at).eq("id", id));
         return r != null;
     }
 
@@ -100,49 +121,53 @@ public class TMetpQcLineServiceImpl implements ITMetpQcLineService {
         if (at == null) {
             return 0;
         }
-        return this.metpQcLineMapper
-                .selectList(new QueryWrapper<TMetpQcLine>().eq("del_flag", 0)).size();
+        return listAvailable(at).size();
     }
 
+    /** 取 ruleCode 在 at 时点生效的那版；够不着线的时点不托底，返回 null（调用方按不可用处理） */
     private TMetpQcLine findRule(String ruleCode, Date at) {
-        List<TMetpQcLine> hit = this.metpQcLineMapper.selectList(new QueryWrapper<TMetpQcLine>()
-                .eq("del_flag", 0).eq("rule_code", ruleCode));
-        TMetpQcLine newest = null;
-        for (TMetpQcLine r : hit) {
-            if (newest == null || r.getEffEnd() == null) {
-                newest = r;
-            } else if (newest.getEffEnd() != null && r.getEffEnd().after(newest.getEffEnd())) {
-                newest = r;
+        List<TMetpQcLine> hit = this.metpQcLineMapper.selectList(availableWrapper(at)
+                .eq("rule_code", ruleCode));
+        if (hit.isEmpty()) {
+            return null;
+        }
+        // 同一时点若有多版交叠，取启用之日最晚的一版；再并列按主键兜底，保证确定
+        hit.sort(new Comparator<TMetpQcLine>() {
+            @Override
+            public int compare(TMetpQcLine a, TMetpQcLine b) {
+                Date ea = a.getEffStart();
+                Date eb = b.getEffStart();
+                if (ea == null && eb == null) {
+                    return byId(a, b);
+                }
+                if (ea == null) {
+                    return 1;
+                }
+                if (eb == null) {
+                    return -1;
+                }
+                int c = eb.compareTo(ea);
+                return c != 0 ? c : byId(a, b);
             }
-        }
-        return newest;
+
+            private int byId(TMetpQcLine a, TMetpQcLine b) {
+                Long ia = a.getId() == null ? Long.valueOf(0L) : a.getId();
+                Long ib = b.getId() == null ? Long.valueOf(0L) : b.getId();
+                return ib.compareTo(ia);
+            }
+        });
+        return hit.get(0);
     }
 
-    /** 阈值解析：档案为主、明细覆盖；两者皆缺返回 null（调用方按不可用处理），精度统一 2 位 */
-    private BigDecimal resolveLimit(TMetpQcLine r, int tier) {
-        if (tier == 1) {
-            return r.getTh1Max();
-        }
-        if (tier == 2) {
-            return r.getTh2Max();
-        }
-        return r.getTh3Max();
-    }
-
-    /** 档案级默认阈值（明细未维护时的回退来源） */
-    private BigDecimal defaultThreshold(TMetpQcLine r, int tier) {
-        return r.getTh1Max();
-    }
-
-    /** 分档：等于上限取高一档 */
+    /** 分档：等于上限取高一档（规程文本口径） */
     private int levelOf(TMetpQcLine rule, BigDecimal input) {
-        if (rule.getTh1Max() != null && input.compareTo(rule.getTh1Max()) <= 0) {
+        if (rule.getTh1Max() != null && input.compareTo(rule.getTh1Max()) < 0) {
             return 1;
         }
-        if (rule.getTh2Max() != null && input.compareTo(rule.getTh2Max()) <= 0) {
+        if (rule.getTh2Max() != null && input.compareTo(rule.getTh2Max()) < 0) {
             return 2;
         }
-        if (rule.getTh3Max() != null && input.compareTo(rule.getTh3Max()) <= 0) {
+        if (rule.getTh3Max() != null && input.compareTo(rule.getTh3Max()) < 0) {
             return 3;
         }
         return 4;

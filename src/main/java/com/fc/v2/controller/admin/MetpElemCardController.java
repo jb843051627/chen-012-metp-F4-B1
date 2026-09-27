@@ -45,6 +45,7 @@ public class MetpElemCardController extends BaseController {
     @ResponseBody
     public ResultTable list(TMetpElemCard record) {
         QueryWrapper<TMetpElemCard> queryWrapper = new QueryWrapper<TMetpElemCard>();
+        queryWrapper.eq("del_flag", 0);
         startPage();
         com.github.pagehelper.PageInfo<TMetpElemCard> page =
                 new com.github.pagehelper.PageInfo<TMetpElemCard>(metpElemCardService.selectTMetpElemCardList(queryWrapper));

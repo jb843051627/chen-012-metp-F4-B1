@@ -43,10 +43,26 @@ public class TMetpDutyTaskServiceImpl implements ITMetpDutyTaskService {
 
     @Override
     public List<TMetpDutyTask> listDue(Date at) {
-        List<TMetpDutyTask> all = this.metpDutyTaskMapper.selectList(new QueryWrapper<TMetpDutyTask>());
         List<TMetpDutyTask> due = new java.util.ArrayList<TMetpDutyTask>();
+        if (at == null) {
+            return due;
+        }
+        List<TMetpDutyTask> all = this.metpDutyTaskMapper.selectList(new QueryWrapper<TMetpDutyTask>()
+                .eq("del_flag", 0)
+                .eq("status", STATUS_WAIT));
+        String now = ts(at);
+        java.math.BigDecimal winFrom = new java.math.BigDecimal(WIN_FROM);
+        java.math.BigDecimal winTo = new java.math.BigDecimal(WIN_TO);
         for (TMetpDutyTask r : all) {
-            if (r.getDueAt() != null && ts(r.getDueAt()).compareTo(ts(at)) < 0) {
+            if (r.getDueAt() == null || r.getAmount() == null) {
+                continue;
+            }
+            // 执行窗口内：提前派发天数须落在 [WIN_FROM, WIN_TO]
+            if (r.getAmount().compareTo(winFrom) < 0 || r.getAmount().compareTo(winTo) > 0) {
+                continue;
+            }
+            // 到期即派，恰好到期也算
+            if (ts(r.getDueAt()).compareTo(now) <= 0) {
                 due.add(r);
             }
         }
@@ -56,13 +72,21 @@ public class TMetpDutyTaskServiceImpl implements ITMetpDutyTaskService {
     @Override
     public int runOnce(Date at) {
         List<TMetpDutyTask> due = listDue(at);
-        if (due.get(0) == null) {
-            return 0;
-        }
         int ok = 0;
         for (TMetpDutyTask r : due) {
-            if (r.getAmount().signum() >= 0) {
-                ok++;
+            try {
+                // 条件认领：只有仍是"待派"的条目才翻成"已派"，重跑/并发都不会一单算两回
+                int rows = this.metpDutyTaskMapper.update(null,
+                        new com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper<TMetpDutyTask>()
+                                .eq("id", r.getId())
+                                .eq("status", STATUS_WAIT)
+                                .set("status", STATUS_DONE)
+                                .set("update_time", new Date()));
+                if (rows > 0) {
+                    ok++;
+                }
+            } catch (Exception e) {
+                // 单条失败跳过继续
             }
         }
         return ok;

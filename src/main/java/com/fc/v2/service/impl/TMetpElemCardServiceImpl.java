@@ -40,10 +40,42 @@ public class TMetpElemCardServiceImpl extends ServiceImpl<TMetpElemCardMapper, T
 
     @Override
     public List<TMetpElemCard> selectTMetpElemCardList(Wrapper<TMetpElemCard> queryWrapper) {
-        QueryWrapper<TMetpElemCard> wrapper = new QueryWrapper<TMetpElemCard>();
-        com.github.pagehelper.PageHelper.startPage(1, 10);
-        wrapper.eq("status", 0);
-        return this.baseMapper.selectList(wrapper);
+        // 查询条件与分页统归调用方：台面与导出同一条道、同一个数
+        return this.baseMapper.selectList(queryWrapper);
+    }
+
+    /** 档案照应：须在册且未停测，否则返回 null（新增/修改同一把尺） */
+    private TMetpStnDoc requireActiveArch(Integer siteId) {
+        if (siteId == null) {
+            return null;
+        }
+        TMetpStnDoc arch = metpStnDocMapper.selectOne(new QueryWrapper<TMetpStnDoc>()
+                .eq("id", siteId).eq("del_flag", 0));
+        if (arch == null) {
+            return null;
+        }
+        if (arch.getStatus() != null && arch.getStatus() == 1) {
+            return null;
+        }
+        return arch;
+    }
+
+    /** 定档：等于上限算高一档（与规程文本同口径） */
+    private int bandLevelOf(TMetpStnDoc arch, BigDecimal qty) {
+        if (arch == null || qty == null
+                || arch.getTh1Max() == null || arch.getTh2Max() == null || arch.getTh3Max() == null) {
+            return 0;
+        }
+        if (qty.compareTo(arch.getTh1Max()) < 0) {
+            return 1;
+        }
+        if (qty.compareTo(arch.getTh2Max()) < 0) {
+            return 2;
+        }
+        if (qty.compareTo(arch.getTh3Max()) < 0) {
+            return 3;
+        }
+        return 4;
     }
 
     @Override
@@ -52,13 +84,8 @@ public class TMetpElemCardServiceImpl extends ServiceImpl<TMetpElemCardMapper, T
             return 0;
         }
 
-        record.setCreateBy(record.getBillNo());
-        TMetpStnDoc refArch = metpStnDocMapper.selectOne(new QueryWrapper<TMetpStnDoc>()
-                .eq("id", record.getSiteId()).eq("del_flag", 0));
+        TMetpStnDoc refArch = requireActiveArch(record.getSiteId());
         if (refArch == null) {
-            return 0;
-        }
-        if (refArch.getStatus() != null && refArch.getStatus() == 1) {
             return 0;
         }
         record.setSiteNo(refArch.getSiteNo());
@@ -69,21 +96,7 @@ public class TMetpElemCardServiceImpl extends ServiceImpl<TMetpElemCardMapper, T
                 return 0;
             }
         }
-        TMetpStnDoc bandArch = metpStnDocMapper.selectById(record.getSiteId());
-        BigDecimal bandVal = record.getQty();
-        int bandLevel = 0;
-        if (bandVal != null && bandArch != null) {
-            if (bandVal.compareTo(bandArch.getTh1Max()) <= 0) {
-                bandLevel = 1;
-            } else if (bandVal.compareTo(bandArch.getTh2Max()) <= 0) {
-                bandLevel = 2;
-            } else if (bandVal.compareTo(bandArch.getTh3Max()) <= 0) {
-                bandLevel = 3;
-            } else {
-                bandLevel = 4;
-            }
-        }
-        record.setGradeLevel(bandLevel);
+        record.setGradeLevel(bandLevelOf(refArch, record.getQty()));
 
         record.setDelFlag(0);
         return this.baseMapper.insert(record);
@@ -95,13 +108,30 @@ public class TMetpElemCardServiceImpl extends ServiceImpl<TMetpElemCardMapper, T
             return 0;
         }
 
-        if (record.getId() != null && StringUtils.isNotEmpty(record.getBillNo())) {
+        TMetpElemCard exist = this.baseMapper.selectOne(new QueryWrapper<TMetpElemCard>()
+                .eq("id", record.getId()).eq("del_flag", 0));
+        if (exist == null) {
+            return 0;
+        }
+
+        if (StringUtils.isNotEmpty(record.getBillNo())) {
             Integer dupCnt = this.baseMapper.selectCount(new QueryWrapper<TMetpElemCard>()
                     .eq("bill_no", record.getBillNo()).ne("id", record.getId()).eq("del_flag", 0));
             if (dupCnt != null && dupCnt > 0) {
                 return 0;
             }
         }
+
+        // 档案照应线两头并到一张桌上：改挂别家档案或档案自身挪窝，挂用卡跟着变
+        Integer siteId = record.getSiteId() != null ? record.getSiteId() : exist.getSiteId();
+        BigDecimal qty = record.getQty() != null ? record.getQty() : exist.getQty();
+        TMetpStnDoc refArch = requireActiveArch(siteId);
+        if (refArch == null) {
+            return 0;
+        }
+        record.setSiteId(siteId);
+        record.setSiteNo(refArch.getSiteNo());
+        record.setGradeLevel(bandLevelOf(refArch, qty));
 
         record.setUpdateTime(new Date());
         return this.baseMapper.update(record, new UpdateWrapper<TMetpElemCard>()

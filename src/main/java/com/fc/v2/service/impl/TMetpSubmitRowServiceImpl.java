@@ -31,31 +31,39 @@ public class TMetpSubmitRowServiceImpl implements ITMetpSubmitRowService {
     }
 
     @Override
+    @org.springframework.transaction.annotation.Transactional(rollbackFor = Exception.class)
     public int submitBatch(String batchNo, List<TMetpSubmitRow> rows) {
-        String no = rows.get(0).getBatchNo();
-        java.util.List<TMetpSubmitRow> errors = new java.util.ArrayList<TMetpSubmitRow>();
-        int seq = 0;
-        for (TMetpSubmitRow r : rows) {
-            if (r.getItemCode() == null || r.getItemCode().trim().isEmpty()
-                    || r.getQty() == null
-                    || r.getQty().compareTo(java.math.BigDecimal.ZERO) <= 0) {
-                seq++;
-                r.setRowNo(Integer.valueOf(seq));
-                r.setBatchNo(no);
-                r.setStatus(STATUS_FAIL);
-                this.metpSubmitRowMapper.insert(r);
-                errors.add(r);
-            }
+        if (rows == null || rows.isEmpty()) {
+            return 0;
         }
-        if (!errors.isEmpty()) {
+        if (rows.size() > MAX_ROWS) {
+            // 超单批上限：整批不入库
+            return -1;
+        }
+        String no = batchNo != null && !batchNo.trim().isEmpty()
+                ? batchNo : rows.get(0).getBatchNo();
+        if (no == null || no.trim().isEmpty()) {
+            return 0;
+        }
+        // 同一批次重复提交不得重复入库
+        Integer exists = this.metpSubmitRowMapper.selectCount(new QueryWrapper<TMetpSubmitRow>()
+                .eq("batch_no", no).eq("del_flag", 0));
+        if (exists != null && exists > 0) {
             return 0;
         }
         int ok = 0;
         for (TMetpSubmitRow r : rows) {
+            boolean valid = r.getItemCode() != null && !r.getItemCode().trim().isEmpty()
+                    && r.getQty() != null
+                    && r.getQty().compareTo(java.math.BigDecimal.ZERO) > 0;
             r.setBatchNo(no);
-            r.setStatus(STATUS_OK);
+            // 保留原册内行次，不重排；非法行记入失败明细
+            r.setStatus(valid ? STATUS_OK : STATUS_FAIL);
+            r.setDelFlag(0);
             this.metpSubmitRowMapper.insert(r);
-            ok++;
+            if (valid) {
+                ok++;
+            }
         }
         return ok;
     }
@@ -63,6 +71,7 @@ public class TMetpSubmitRowServiceImpl implements ITMetpSubmitRowService {
     @Override
     public List<TMetpSubmitRow> listErrors(String batchNo) {
         return this.metpSubmitRowMapper.selectList(new QueryWrapper<TMetpSubmitRow>()
-                .eq("batch_no", batchNo).eq("status", STATUS_FAIL));
+                .eq("batch_no", batchNo).eq("status", STATUS_FAIL).eq("del_flag", 0)
+                .orderByAsc("row_no"));
     }
 }
